@@ -1,3 +1,6 @@
 venv/
 myenv/
 .env
+models/
+notebooks/cleaned_data.pkl
+__pycache__/

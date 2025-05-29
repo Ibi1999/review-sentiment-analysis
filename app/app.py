@@ -3,14 +3,31 @@ import requests
 import re
 import nltk
 import os
+import pandas as pd
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from dotenv import load_dotenv
 from rapidfuzz import fuzz
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 # Load environment variables
 load_dotenv()
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
+
+# Initialize VADER
+_vader_analyzer = SentimentIntensityAnalyzer()
+
+# Private method for VADER sentiment analysis
+def _analyze_sentiment_vader(reviews):
+    results = []
+    for review in reviews:
+        if review and len(review) > 20:
+            cleaned = preprocess(review)
+            scores = _vader_analyzer.polarity_scores(cleaned)
+            # Only positive or negative
+            sentiment = "positive" if scores['compound'] >= 0 else "negative"
+            results.append((review, sentiment, scores['compound']))
+    return results
 
 # NLTK setup
 nltk.download("stopwords")
@@ -73,7 +90,14 @@ def search_movies_by_name(movie_name):
         return []
 
 # Streamlit UI
-st.title("🎬 Movie Review Preprocessor")
+st.set_page_config(page_title="Movie Review Sentiment Analyzer", layout="wide")
+
+# Sidebar: Sentiment analyzer selection
+with st.sidebar:
+    model_choice = st.selectbox("Select Sentiment Analyzer", ("VADER", "ML (in progress)"))
+
+# Dynamic title
+st.title(f"🎬 Movie Review Sentiment Analyzer ({model_choice})")
 
 if not TMDB_API_KEY:
     st.error("❌ TMDB_API_KEY not set in environment variables.")
@@ -83,13 +107,13 @@ search_mode = st.radio("Search by:", ["Movie ID", "Movie Name"])
 
 selected_movie_id = None
 
-# 🎯 Search by ID
+# Search by ID
 if search_mode == "Movie ID":
     movie_id_input = st.text_input("Enter TMDB Movie ID")
     if movie_id_input:
         selected_movie_id = movie_id_input
 
-# 🔍 Search by name
+# Search by name
 elif search_mode == "Movie Name":
     movie_name_input = st.text_input("Enter Movie Name")
     if movie_name_input:
@@ -104,14 +128,35 @@ elif search_mode == "Movie Name":
         else:
             st.warning("No movies found.")
 
-# ✅ Unified fetch and clean button
-if selected_movie_id and st.button("Fetch & Clean Reviews"):
+# Place the checkbox before the fetch button
+show_reviews = st.checkbox("Show individual reviews")
+
+# Review Fetch + Sentiment Analysis
+if selected_movie_id and st.button("Fetch & Analyze Sentiment"):
     reviews = get_reviews(selected_movie_id)
-    if reviews:
-        unique_reviews = remove_near_duplicates(reviews, threshold=95)
-        cleaned_reviews = [preprocess(r) for r in reviews if r and len(r) > 20]
-        st.subheader("🧼 Cleaned Reviews")
-        for idx, r in enumerate(cleaned_reviews, 1):
-            st.markdown(f"**{idx}.** {r}")
-    else:
+    if not reviews:
         st.info("No reviews found for this movie.")
+    else:
+        unique_reviews = remove_near_duplicates(reviews, threshold=95)
+
+        if model_choice == "VADER":
+            results = _analyze_sentiment_vader(unique_reviews)
+            if results:
+                avg_compound = sum(score for _, _, score in results) / len(results)
+                overall_pct = (avg_compound + 1) / 2 * 100  # Convert from [-1, 1] to [0, 100]
+                st.subheader("🧠 Overall Sentiment (VADER)")
+                st.metric(label="Overall Sentiment Score", value=f"{overall_pct:.1f}% Positive")
+
+                if show_reviews:
+                    st.subheader("🗂 Review Breakdown")
+                    for idx, (review, sentiment, score) in enumerate(results, 1):
+                        st.markdown(f"**{idx}. Sentiment:** `{sentiment}` &nbsp;&nbsp; | &nbsp;&nbsp; **Score:** `{score:.3f}`")
+                        st.write(review)
+                        st.markdown("---")
+                
+            else:
+                st.info("No valid reviews after preprocessing.")
+
+        elif model_choice == "ML (in progress)":
+            st.subheader("🧪 Sentiment Analysis (ML Model)")
+            st.info("This feature is currently under development.")
