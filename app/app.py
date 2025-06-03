@@ -4,6 +4,8 @@ import re
 import nltk
 import os
 import pandas as pd
+import torch
+from transformers import RobertaTokenizer, RobertaForSequenceClassification
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from dotenv import load_dotenv
@@ -14,6 +16,19 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 load_dotenv()
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 
+# Preprocessing function
+def preprocess_vader(text):
+    text = re.sub(r"[^a-zA-Z]", " ", text).lower()
+    tokens = text.split()
+    tokens = [t for t in tokens if t not in stopwords.words("english")]
+    lemmatizer = WordNetLemmatizer()
+    tokens = [lemmatizer.lemmatize(t) for t in tokens]
+    return " ".join(tokens)
+
+def preprocess_roberta(text):
+    text = re.sub(r"<.*?>", " ", text)
+    return text.lower()
+
 # Initialize VADER
 _vader_analyzer = SentimentIntensityAnalyzer()
 
@@ -22,25 +37,50 @@ def _analyze_sentiment_vader(reviews):
     results = []
     for review in reviews:
         if review and len(review) > 20:
-            cleaned = preprocess(review)
+            cleaned = preprocess_vader(review)
             scores = _vader_analyzer.polarity_scores(cleaned)
             # Only positive or negative
             sentiment = "positive" if scores['compound'] >= 0 else "negative"
             results.append((review, sentiment, scores['compound']))
     return results
 
-# NLTK setup
-nltk.download("stopwords")
-nltk.download("wordnet")
+#Load RoBERTa model and tokenizer
+MODEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'models', 'roberta_sentiment'))
 
-# Preprocessing function
-def preprocess(text):
-    text = re.sub(r"[^a-zA-Z]", " ", text).lower()
-    tokens = text.split()
-    tokens = [t for t in tokens if t not in stopwords.words("english")]
-    lemmatizer = WordNetLemmatizer()
-    tokens = [lemmatizer.lemmatize(t) for t in tokens]
-    return " ".join(tokens)
+model = RobertaForSequenceClassification.from_pretrained(MODEL_DIR)
+tokenizer = RobertaTokenizer.from_pretrained(MODEL_DIR)
+
+@st.cache_resource
+def load_roberta_model():
+    MODEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'models', 'roberta_sentiment'))
+    model = RobertaForSequenceClassification.from_pretrained(MODEL_DIR)
+    tokenizer = RobertaTokenizer.from_pretrained(MODEL_DIR)
+    return model, tokenizer
+
+def roberta_predict(texts, model, tokenizer):
+    model.eval()
+    cleaned = [preprocess_roberta(r) for r in texts]
+    inputs = tokenizer(cleaned, padding=True, truncation=True, max_length=128, return_tensors='pt')
+    with torch.no_grad():
+        outputs = model(**inputs)
+        probs = torch.softmax(outputs.logits, dim=1)
+        preds = torch.argmax(probs, dim=1).cpu().numpy()
+        scores = probs[:, 1].cpu().numpy()  # probability of positive
+    sentiments = ['positive' if p == 1 else 'negative' for p in preds]
+    return list(zip(texts, sentiments, scores))
+
+# NLTK setup
+nltk_data_dir = os.path.join(os.path.dirname(__file__), "nltk_data")
+if not os.path.exists(nltk_data_dir):
+    os.makedirs(nltk_data_dir)
+
+nltk.data.path.append(nltk_data_dir)
+
+for resource in ["stopwords", "wordnet"]:
+    try:
+        nltk.data.find(f"corpora/{resource}")
+    except LookupError:
+        nltk.download(resource, download_dir=nltk_data_dir)
 
 # Remove near duplicates
 def normalize_text(text):
@@ -94,7 +134,7 @@ st.set_page_config(page_title="Movie Review Sentiment Analyzer", layout="wide")
 
 # Sidebar: Sentiment analyzer selection
 with st.sidebar:
-    model_choice = st.selectbox("Select Sentiment Analyzer", ("VADER", "ML (in progress)"))
+    model_choice = st.selectbox("Select Sentiment Analyzer", ("VADER", "RoBERTa ML"))
 
 # Dynamic title
 st.title(f"🎬 Movie Review Sentiment Analyzer ({model_choice})")
@@ -150,13 +190,44 @@ if selected_movie_id and st.button("Fetch & Analyze Sentiment"):
                 if show_reviews:
                     st.subheader("🗂 Review Breakdown")
                     for idx, (review, sentiment, score) in enumerate(results, 1):
-                        st.markdown(f"**{idx}. Sentiment:** `{sentiment}` &nbsp;&nbsp; | &nbsp;&nbsp; **Score:** `{score:.3f}`")
+                        color_sentiment = "#2ecc40" if sentiment == "positive" else "red"  # softer green
+                        if score < 0:
+                            color_score = "red"
+                        elif score >= 0:
+                            color_score = "#2ecc40"
+
+                        st.markdown(
+                            f"<b>{idx}. Sentiment:</b> <span style='color:{color_sentiment}'>{sentiment}</span> &nbsp; | &nbsp; "
+                            f"<b>Score:</b> <code><span style='color:{color_score}'>{score:.3f}</span></code>",
+                            unsafe_allow_html=True
+                        )
                         st.write(review)
                         st.markdown("---")
                 
             else:
                 st.info("No valid reviews after preprocessing.")
 
-        elif model_choice == "ML (in progress)":
-            st.subheader("🧪 Sentiment Analysis (ML Model)")
-            st.info("This feature is currently under development.")
+        elif model_choice == "RoBERTa ML":
+            model, tokenizer = load_roberta_model()
+            results = roberta_predict(unique_reviews, model, tokenizer)
+            if results:
+                avg_score = sum(score for _, _, score in results) / len(results)
+                overall_pct = avg_score * 100  # since score is probability of positive
+                st.subheader("🧠 Overall Sentiment (RoBERTa ML)")
+                st.metric(label="Overall Sentiment Score", value=f"{overall_pct:.1f}% Positive")
+            if show_reviews:
+                st.subheader("🗂 Review Breakdown")
+                for idx, (review, sentiment, score) in enumerate(results, 1):
+                    color_sentiment = "#2ecc40" if sentiment == "positive" else "red"  # softer green
+                    if score < 0.5:
+                        color_score = "red"
+                    elif score >= 0.5:
+                        color_score = "#2ecc40"
+
+                    st.markdown(
+                        f"<b>{idx}. Sentiment:</b> <span style='color:{color_sentiment}'>{sentiment}</span> &nbsp; | &nbsp; "
+                        f"<b>Score:</b> <code><span style='color:{color_score}'>{score:.3f}</span></code>",
+                        unsafe_allow_html=True
+                    )
+                    st.write(review)
+                    st.markdown("---")
