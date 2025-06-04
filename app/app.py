@@ -229,7 +229,7 @@ def plot_horizontal_bar(roberta_results, tfidf_results, vader_results, key):
         x=counts,
         y=model_names,
         orientation='h',
-        marker=dict(color=['#ff69b4', '#3498db', '#f39c12']),  # Pink, Blue, Orange
+        marker = dict(color=['#ff69b4', '#3498db', '#6a0dad'])  # Hot Pink, Bright Blue, Amethyst Purple
     ))
     fig.update_layout(
         title="Positive Review Count by Model",
