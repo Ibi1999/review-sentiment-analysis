@@ -78,9 +78,19 @@ def _analyze_sentiment_vader(reviews):
         if review and len(review) > 20:
             cleaned = preprocess_vader(review)
             scores = _vader_analyzer.polarity_scores(cleaned)
-            sentiment = "positive" if scores['compound'] >= 0 else "negative"
-            results.append((review, sentiment, scores['compound']))
+            standardized_score = (scores['compound'] + 1) / 2  # 0 to 1 scale
+
+            if standardized_score >= 0.55:
+                sentiment = "positive"
+            elif standardized_score <= 0.45:
+                sentiment = "negative"
+            else:
+                sentiment = "neutral"
+
+            results.append((review, sentiment, standardized_score))
     return results
+
+
 
 # RoBERTa model loader
 @st.cache_resource
@@ -97,10 +107,19 @@ def roberta_predict(texts, model, tokenizer):
     with torch.no_grad():
         outputs = model(**inputs)
         probs = torch.softmax(outputs.logits, dim=1)
-        preds = torch.argmax(probs, dim=1).cpu().numpy()
-        scores = probs[:, 1].cpu().numpy()
-    sentiments = ['positive' if p == 1 else 'negative' for p in preds]
-    return list(zip(texts, sentiments, scores))
+        scores = probs[:, 1].cpu().numpy()  # positive class prob
+
+    sentiments = []
+    for i, score in enumerate(scores):
+        if score >= 0.55:
+            sentiment = "positive"
+        elif score <= 0.45:
+            sentiment = "negative"
+        else:
+            sentiment = "neutral"
+        sentiments.append((texts[i], sentiment, score))
+    return sentiments
+
 
 # TF-IDF model loader
 @st.cache_resource
@@ -111,14 +130,23 @@ def load_tfidf_model():
 
 def tfidf_predict(texts, pipeline):
     preprocessed = [preprocess_vader(text) for text in texts]
-    preds = pipeline.predict(preprocessed)
     if hasattr(pipeline, "predict_proba"):
         probs = pipeline.predict_proba(preprocessed)
         scores = probs[:, 1]
     else:
-        scores = [1.0 if p == 1 else 0.0 for p in preds]
-    sentiments = ['positive' if p == 1 else 'negative' for p in preds]
+        scores = [1.0 if p == 1 else 0.0 for p in pipeline.predict(preprocessed)]
+
+    sentiments = []
+    for score in scores:
+        if score >= 0.55:
+            sentiments.append("positive")
+        elif score <= 0.45:
+            sentiments.append("negative")
+        else:
+            sentiments.append("neutral")
+
     return list(zip(texts, sentiments, scores))
+
 
 # Dedupe helper
 def normalize_text(text):
@@ -171,11 +199,24 @@ def search_movies_by_name(movie_name):
 def plot_donut_chart(results, title, key):
     pos_count = sum(1 for r in results if r[1] == "positive")
     neg_count = sum(1 for r in results if r[1] == "negative")
-    fig = go.Figure(data=[go.Pie(labels=['Positive', 'Negative'], values=[pos_count, neg_count],
-                                 hole=.6,
-                                 marker_colors=['#2ecc40', '#e74c3c'])])
-    fig.update_layout(title_text=title, margin=dict(t=40, b=0, l=0, r=0), showlegend=True, legend=dict(orientation="h", y=-0.1))
+    neu_count = sum(1 for r in results if r[1] == "neutral")
+    
+    fig = go.Figure(data=[go.Pie(
+        labels=['Positive', 'Neutral', 'Negative'],
+        values=[pos_count, neu_count, neg_count],
+        hole=.6,
+        marker_colors=['#2ecc40', '#f1c40f', '#e74c3c']  # Green, Yellow, Red
+    )])
+    
+    fig.update_layout(
+        title_text=title,
+        margin=dict(t=40, b=0, l=0, r=0),
+        showlegend=True,
+        legend=dict(orientation="h", y=-0.1)
+    )
+    
     st.plotly_chart(fig, use_container_width=True, key=key)
+
 
 def plot_horizontal_bar(roberta_results, tfidf_results, vader_results, key):
     model_names = ["RoBERTa", "TF-IDF", "VADER"]
@@ -188,7 +229,7 @@ def plot_horizontal_bar(roberta_results, tfidf_results, vader_results, key):
         x=counts,
         y=model_names,
         orientation='h',
-        marker=dict(color=['#3498db', '#f39c12', '#2ecc40']),
+        marker=dict(color=['#ff69b4', '#3498db', '#f39c12']),  # Pink, Blue, Orange
     ))
     fig.update_layout(
         title="Positive Review Count by Model",
@@ -198,17 +239,28 @@ def plot_horizontal_bar(roberta_results, tfidf_results, vader_results, key):
     )
     st.plotly_chart(fig, use_container_width=True, key=key)
 
+
 def display_reviews(results, sentiment_filter=None):
     filtered = [r for r in results if sentiment_filter is None or r[1] == sentiment_filter]
     for idx, (review, sentiment, score) in enumerate(filtered, 1):
-        color = "#2ecc40" if sentiment == "positive" else "#e74c3c"
+        if sentiment == "positive":
+            color = "#2ecc40"  # Green
+        elif sentiment == "negative":
+            color = "#e74c3c"  # Red
+        elif sentiment == "neutral":
+            color = "#f1c40f"  # Yellow
+        else:
+            color = "#000000"  # Default black just in case
+
         st.markdown("---")
         st.markdown(
             f"<span style='color:{color}; font-weight:bold;'>Sentiment:</span> {sentiment.capitalize()}  |  "
             f"<span style='color:{color}; font-weight:bold;'>Score:</span> {score:.3f}",
-            unsafe_allow_html=True)
+            unsafe_allow_html=True
+        )
         st.markdown(f"**Review #{idx}:**")
         st.markdown(review)
+
 
 # -------- Main App --------
 st.title("🎬 Movie Review Sentiment Analyzer")
@@ -276,6 +328,7 @@ if st.session_state.selected_movie_id:
                 if key in st.session_state:
                     del st.session_state[key]
         else:
+            st.success(f"Fetched {len(reviews)} reviews from TMDB API.")
             unique_reviews = remove_near_duplicates(reviews, threshold=95)
 
             vader_results = _analyze_sentiment_vader(unique_reviews)
@@ -291,26 +344,50 @@ if st.session_state.selected_movie_id:
     def roberta_pos_changed():
         if st.session_state["roberta_pos"]:
             st.session_state["roberta_neg"] = False
+            st.session_state["roberta_neu"] = False
 
     def roberta_neg_changed():
         if st.session_state["roberta_neg"]:
             st.session_state["roberta_pos"] = False
+            st.session_state["roberta_neu"] = False
+
+    def roberta_neu_changed():
+        if st.session_state["roberta_neu"]:
+            st.session_state["roberta_pos"] = False
+            st.session_state["roberta_neg"] = False
+
 
     def tfidf_pos_changed():
         if st.session_state["tfidf_pos"]:
             st.session_state["tfidf_neg"] = False
+            st.session_state["tfidf_neu"] = False
 
     def tfidf_neg_changed():
         if st.session_state["tfidf_neg"]:
             st.session_state["tfidf_pos"] = False
+            st.session_state["tfidf_neu"] = False
+
+    def tfidf_neu_changed():
+        if st.session_state["tfidf_neu"]:
+            st.session_state["tfidf_pos"] = False
+            st.session_state["tfidf_neg"] = False
+
 
     def vader_pos_changed():
         if st.session_state["vader_pos"]:
             st.session_state["vader_neg"] = False
+            st.session_state["vader_neu"] = False
 
     def vader_neg_changed():
         if st.session_state["vader_neg"]:
             st.session_state["vader_pos"] = False
+            st.session_state["vader_neu"] = False
+
+    def vader_neu_changed():
+        if st.session_state["vader_neu"]:
+            st.session_state["vader_pos"] = False
+            st.session_state["vader_neg"] = False
+
 
     if 'roberta_results' in st.session_state and 'tfidf_results' in st.session_state and 'vader_results' in st.session_state:
         roberta_results = st.session_state['roberta_results']
@@ -337,16 +414,24 @@ if st.session_state.selected_movie_id:
                     key="roberta_neg",
                     on_change=roberta_neg_changed
                 )
+                neutral_checked = st.checkbox(
+                    "Only show neutral",
+                    value=False,
+                    key="roberta_neu",
+                    on_change=roberta_neu_changed
+                )
 
             with col2:
                 plot_horizontal_bar(roberta_results, tfidf_results, vader_results, key="bar_roberta")
 
-            if st.session_state.get("roberta_pos"):
-                filtered = [r for r in roberta_results if r[1] == "positive"]
-            elif st.session_state.get("roberta_neg"):
-                filtered = [r for r in roberta_results if r[1] == "negative"]
-            else:
-                filtered = roberta_results
+                if st.session_state.get("roberta_pos"):
+                    filtered = [r for r in roberta_results if r[1] == "positive"]
+                elif st.session_state.get("roberta_neg"):
+                    filtered = [r for r in roberta_results if r[1] == "negative"]
+                elif st.session_state.get("roberta_neu"):
+                    filtered = [r for r in roberta_results if r[1] == "neutral"]
+                else:
+                    filtered = roberta_results
 
             display_reviews(filtered)
 
@@ -367,16 +452,24 @@ if st.session_state.selected_movie_id:
                     key="tfidf_neg",
                     on_change=tfidf_neg_changed
                 )
+                neutral_checked = st.checkbox(
+                    "Only show neutral",
+                    value=False,
+                    key="tfidf_neu",
+                    on_change=tfidf_neu_changed
+                )
 
             with col2:
                 plot_horizontal_bar(roberta_results, tfidf_results, vader_results, key="bar_tfidf")
 
-            if st.session_state.get("tfidf_pos"):
-                filtered = [r for r in tfidf_results if r[1] == "positive"]
-            elif st.session_state.get("tfidf_neg"):
-                filtered = [r for r in tfidf_results if r[1] == "negative"]
-            else:
-                filtered = tfidf_results
+                if st.session_state.get("tfidf_pos"):
+                    filtered = [r for r in tfidf_results if r[1] == "positive"]
+                elif st.session_state.get("tfidf_neg"):
+                    filtered = [r for r in tfidf_results if r[1] == "negative"]
+                elif st.session_state.get("tfidf_neu"):
+                    filtered = [r for r in tfidf_results if r[1] == "neutral"]
+                else:
+                    filtered = tfidf_results
 
             display_reviews(filtered)
 
@@ -397,16 +490,24 @@ if st.session_state.selected_movie_id:
                     key="vader_neg",
                     on_change=vader_neg_changed
                 )
+                neutral_checked = st.checkbox(
+                    "Only show neutral",
+                    value=False,
+                    key="vader_neu",
+                    on_change=vader_neu_changed
+                )
 
             with col2:
                 plot_horizontal_bar(roberta_results, tfidf_results, vader_results, key="bar_vader")
 
-            if st.session_state.get("vader_pos"):
-                filtered = [r for r in vader_results if r[1] == "positive"]
-            elif st.session_state.get("vader_neg"):
-                filtered = [r for r in vader_results if r[1] == "negative"]
-            else:
-                filtered = vader_results
+                if st.session_state.get("vader_pos"):
+                    filtered = [r for r in vader_results if r[1] == "positive"]
+                elif st.session_state.get("vader_neg"):
+                    filtered = [r for r in vader_results if r[1] == "negative"]
+                elif st.session_state.get("vader_neu"):
+                    filtered = [r for r in vader_results if r[1] == "neutral"]
+                else:
+                    filtered = vader_results
 
             display_reviews(filtered)
     else:
