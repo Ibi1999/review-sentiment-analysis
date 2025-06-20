@@ -14,7 +14,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import plotly.graph_objects as go
 
 # Page config
-st.set_page_config(page_title="Movie Review Sentiment Analyzer", layout="wide")
+st.set_page_config(page_title="Movie Review Sentiment Analyzer", layout="wide",initial_sidebar_state="expanded")
 
 # Sidebar
 with st.sidebar:
